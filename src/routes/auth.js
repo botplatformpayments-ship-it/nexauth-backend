@@ -7,6 +7,7 @@ const authMiddleware = require('../middleware/auth');
 
 const router = express.Router();
 
+// ── DASHBOARD OWNER REGISTER ─────────────────────────
 router.post('/register', async (req, res) => {
   try {
     const { username, email, password, firstName, lastName } = req.body;
@@ -40,6 +41,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
+// ── DASHBOARD OWNER LOGIN ────────────────────────────
 router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -63,6 +65,70 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ── APP USER LOGIN (C# SDK / WinForms) ──────────────
+// Yeh endpoint C# app ke liye hai — app_users table check karta hai
+router.post('/app-login', async (req, res) => {
+  try {
+    const { username, password, hwid } = req.body;
+    if (!username || !password)
+      return res.status(400).json({ success: false, message: 'All fields required' });
+
+    // app_users table mein dhundho
+    const { data: appUser } = await supabase
+      .from('app_users')
+      .select('*')
+      .or(`username.eq.${username},email.eq.${username}`)
+      .single();
+
+    if (!appUser)
+      return res.status(401).json({ success: false, message: 'Invalid username or password' });
+
+    // Ban check
+    if (appUser.status === 'banned')
+      return res.status(403).json({ success: false, message: 'Your account has been banned' });
+
+    // Expiry check
+    if (appUser.subscription_expiry && new Date(appUser.subscription_expiry) < new Date())
+      return res.status(403).json({ success: false, message: 'Subscription expired' });
+
+    // Password check
+    const valid = await bcrypt.compare(password, appUser.password);
+    if (!valid)
+      return res.status(401).json({ success: false, message: 'Invalid username or password' });
+
+    // HWID check — agar pehle se bound hai toh match karo
+    if (appUser.hwid && hwid && appUser.hwid !== hwid)
+      return res.status(403).json({ success: false, message: 'HWID mismatch — contact support' });
+
+    // HWID bind karo agar pehli baar login hai
+    if (!appUser.hwid && hwid) {
+      await supabase.from('app_users').update({ hwid }).eq('id', appUser.id);
+    }
+
+    // Token generate karo
+    const token = jwt.sign(
+      { id: appUser.id, username: appUser.username, appId: appUser.app_id },
+      process.env.JWT_SECRET, { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: appUser.id,
+        username: appUser.username,
+        email: appUser.email,
+        status: appUser.status,
+        subscription_expiry: appUser.subscription_expiry
+      }
+    });
+  } catch (err) {
+    console.error('[APP-LOGIN]', err.message);
+    res.status(500).json({ success: false, message: 'Login failed' });
+  }
+});
+
+// ── ME ───────────────────────────────────────────────
 router.get('/me', authMiddleware, async (req, res) => {
   const { data: user } = await supabase.from('users')
     .select('id, username, email, first_name, last_name, plan, created_at')
